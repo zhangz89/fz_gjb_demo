@@ -1,0 +1,260 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+
+import pandas as pd
+import numpy as np
+from scipy.stats import zscore
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression 
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error
+import datetime
+import lightgbm as lgb
+from sklearn.linear_model import LogisticRegression
+
+df_user=pd.read_table('gjb\\user_info.txt', sep=',',header=None, index_col=False, names=['客户号','客户名','国籍','出生日期','职业','住址'], dtype='str')
+df_tx=pd.read_table('gjb\\tx_flow.txt', sep=',', header=None, index_col=False, names=['客户号','交易日期','交易时间','借贷','交易金额','账户余额','商户类型','商户编号','备注'], dtype='str')
+df_aum=pd.read_table('gjb\\user_aum.txt', sep=',', header=None, index_col=False, names=['客户号','管资','管资月日均','管资年日均'], dtype='str')
+
+
+print(df_tx['借贷'].value_counts())
+print(df_tx['商户类型'].value_counts())
+print(df_tx['商户编号'].value_counts())
+
+
+##只是筛选需要的列
+df_user = df_user[['客户号','国籍','出生日期','职业']]
+df_tx = df_tx[['客户号','交易日期','交易时间','借贷','交易金额','账户余额','商户类型']]
+
+
+df_user.dropna(inplace=True)
+df_tx.dropna(inplace=True)
+df_user.reset_index(inplace=True)
+df_tx.reset_index(inplace=True)
+
+
+def get_age(dt:str):
+    born = datetime.date(*map(int, dt.split('-')))
+    #born = datetime.date(dt)
+    today = datetime.date.today()
+    try:
+        birthday = born.replace(year=today.year)
+    except ValueError:
+        birthday = born.replace(year=today.year, day=born.day-1)
+
+    if birthday > today:
+        return today.year - born.year - 1
+    else:
+        return today.year - born.year
+    #return int ((datetime.datetime.now() - pd.to_datetime(dt))/pd.Timedelta('365 days'))
+get_age('1999-01-01')
+
+def get_age_section(age):
+    if age < 20:
+        return 0;
+    if age >= 20 and age < 30:
+        return 1;
+    if age >= 30 and age < 40:
+        return 2;
+    if age >= 40 and age < 50:
+        return 3;
+    if age >= 50 and age < 60:
+        return 4;
+    if age >= 60:
+        return 5;
+
+#df['AGE'] = df.apply(lambda x : get_age(x))
+df_user['年龄'] = df_user['出生日期'].apply(lambda x : get_age(x))
+df_user['年龄段'] = df_user['年龄'].apply(lambda x : get_age_section(x))
+print(df_user['年龄段'].value_counts())
+
+df_user = df_user[['客户号','国籍','年龄段','职业']]
+
+
+df_tx=df_tx[df_tx['借贷']=='0001']
+df_tx.reset_index(inplace=True)
+
+df_tx.sort_values(by=['交易日期','交易时间'], ascending=[True,True],inplace=True)
+
+df_tx = df_tx[['客户号','交易日期','交易时间','交易金额','账户余额','商户类型']]
+df_tx.reset_index(inplace=True)
+
+df_tmp = pd.merge(df_tx,df_user,on='客户号',how='left')
+
+
+df_tx_user = df_tmp[['客户号','交易日期','交易时间','交易金额','账户余额','商户类型','国籍','年龄段','职业']]
+df_tx_user['交易金额'] = df_tx_user['交易金额'].astype('float')
+df_tx_user['账户余额'] = df_tx_user['账户余额'].astype('float')
+print(df_tx_user.dtypes)
+
+df_tx_user.sort_values(by=['交易日期','交易时间'], ascending=[True,True],inplace=True)
+
+
+df_tx_user.reset_index(inplace=True)
+del df_tx_user['index']
+
+df_g = df_tx_user.groupby('客户号')['交易日期'].count()
+df_tz = pd.DataFrame()
+df_tz['客户号'] = df_tx_user['客户号'].unique()
+df_tz=pd.merge(df_tz,df_g,on='客户号',how='left')
+df_tz.rename(columns={'交易日期':'消费频次'}, inplace=True)
+
+df_g = df_tx_user.groupby('客户号')['交易金额'].sum()
+df_tz = pd.merge(df_tz,df_g,on='客户号',how='left')
+df_tz.rename(columns={'交易金额':'消费总金额'},inplace=True)
+
+def time_cnvert(s):
+    s_tmp = pd.to_datetime(s,format='%H.%M.%S')
+    if pd.to_datetime('1900-01-01 07:00:00') < s_tmp < pd.to_datetime('1900-01-01 19:00:00'):
+        return 1;
+    else:
+        return 0;
+
+df_tx_user['交易时间_小时'] = df_tx_user['交易时间'].apply(lambda x: int(x[:2]))
+df_tx_user['消费时间段'] = df_tx_user['交易时间_小时'].apply(lambda x : 1 if x > 7 and x < 19 else 0 )
+df_tx_user
+
+df_g = df_tx_user.groupby('客户号')['消费时间段'].unique()
+df_g_2 = pd.DataFrame(df_g, columns=['消费时间段'])
+df_g_2
+for sjd in [0,1]:
+    df_g_2['消费时间段_' + str(sjd)] = df_g_2['消费时间段'].apply(lambda x: 1 if sjd in x else 0)
+
+df_tz = pd.merge(df_tz, df_g_2, on='客户号', how='left')
+# df_g_2 = df_tx_user.groupby('CSTNO')['消费时间段'].count()
+# df_g_3=pd.merge(df_g,df_g_2,on='CSTNO',how='left')
+
+# df_g_3['消费时间']=0
+# for i in range(len(df_g_3)):
+#     if df_g_3.iloc[i,0] == df_g_3.iloc[i,1]:
+#         df_g_3.iloc[i,2]=1
+#     elif df_g_3.iloc[i,0] != df_g_3.iloc[i,1]:
+#         if df_g_3.iloc[i,0]!=0:
+#             df_g_3.iloc[i,2]=0
+#         else:
+#             df_g_3.iloc[i,2]=2
+# df_g_3['消费时间'].value_counts()
+# del df_g_3['消费时间段_x']
+# del df_g_3['消费时间段_y']
+# df_=pd.merge(df_,df_g_3,on='CSTNO',how='left')
+
+del df_tz['消费时间段']
+
+df_tz = pd.merge(df_tz, df_user, on='客户号', how='left')
+
+df_tz = pd.merge(df_tz,df_aum,on='客户号',how='left')
+
+df_tz = pd.get_dummies(df_tz, columns=['国籍'])
+
+df_tz['管资'] = df_tz['管资'].astype('float')
+df_tz['管资年日均'] = df_tz['管资年日均'].astype('float')
+
+##df_tz=df_tz.drop(columns=['管资月日均'])
+df_tz['管资_等级']=df_tz['管资'].apply(lambda x: 0 if x < 1000 else (1 if x < 10000 else (2 if x < 50000 else 3)))
+df_tz['管资年日均_等级']=df_tz['管资年日均'].apply(lambda x: 0 if x < 1000 else (1 if x < 10000 else (2 if x < 50000 else 3)))
+del df_tz['管资月日均']
+
+df_tz = pd.get_dummies(df_tz, columns=['年龄段','职业'])
+
+df_tz = pd.get_dummies(df_tz, columns=['管资_等级','管资年日均_等级'])
+
+df_tz['消费总金额']=zscore(df_tz['消费总金额'])
+
+print(df_tz.corr)
+
+
+df_tx['商户类型'] = df_tx['商户类型'].astype('int')
+
+df_tx_dumm = pd.get_dummies(df_tx,columns=['商户类型'],prefix='购买商品')
+
+mechent_list=list(df_tx['商户类型'].value_counts().index)
+
+df_temp = pd.DataFrame(df_tx.groupby('客户号')['商户类型'].unique(), columns=['商户类型'])
+# df_temp.index.name = 'index'
+for i in mechent_list:
+    df_temp['购买商品_' + str(i)] = df_temp['商户类型'].apply(lambda x: 1 if i in x else 0)
+del df_temp['商户类型']
+df_tz = pd.merge(df_tz, df_temp, on='客户号', how='left')
+
+
+import random
+df_y_0=pd.DataFrame()
+for i in range(len(df_tz)):
+    df_temp=df_tx[df_tx['客户号']==df_tz.iloc[i,0]]
+    mechnttype=df_temp['商户类型'].unique()
+    random.shuffle(mechent_list)
+    flag=0
+    for z in mechent_list:
+        if z not in mechnttype:
+            df_y_0=pd.concat([df_y_0,pd.DataFrame({'客户号':[str(df_tz.iloc[i,0])],'商户类型':[int(z)]})])
+            flag+=1
+        if flag>30:
+            break
+
+df_y_0['商户类型'] = df_y_0['商户类型'].astype('int')
+
+
+##将用户特征并入流水中
+df_tx_mech=df_tx[['客户号','商户类型']]
+df_tx_final=pd.merge(df_tx_mech, df_tz, on='客户号', how='left')
+df_tx_final=pd.get_dummies(df_tx_final, columns=['商户类型'])
+df_tx_final['y']=1
+
+df_tx_mech_n=pd.merge(df_y_0,df_tz, on='客户号', how='left')
+df_tx_final_n=pd.get_dummies(df_tx_mech_n, columns=['商户类型'])
+df_tx_final_n['y']=0
+
+
+# In[42]:
+
+
+df_xy=pd.concat([df_tx_final,df_tx_final_n])
+
+
+xtrain,xtest,ytrain,ytest = train_test_split(df_xy.iloc[:,1:-1],df_xy.iloc[:,-1],train_size=0.7)
+
+
+
+lgb_train=lgb.Dataset(xtrain.values,ytrain.values)
+lgb_eval=lgb.Dataset(xtest.values,ytest.values)
+
+
+
+params = {'task':'train',
+    'boosting_type':'gbdt',
+    'objective':'binary',
+    'metric':'binary_logloss',
+    'num_leaves':31,
+    'learning_rate':0.05,
+    'feature_fraction':0.9,
+    'bagging_fraction':0.8,
+    'bagging_freq':5,
+    'verbose':0}
+num_leaves = 31
+
+
+gbm=lgb.train(params,train_set=lgb_train,num_boost_round=20,valid_sets=lgb_eval,early_stopping_rounds=5)
+y_predict_gbm = gbm.predict(xtrain, pred_leaf=True)
+
+transformed_training_matrix = np.zeros([len(y_predict_gbm), len(y_predict_gbm[0]) * num_leaves],
+                                               dtype=np.int32)  # N * num_tress * num_leafs
+
+for i in range(0, len(y_predict_gbm)):
+    temp = np.arange(len(y_predict_gbm[0])) * num_leaves + np.array(y_predict_gbm[i])
+    transformed_training_matrix[i][temp] += 1
+lr_model = LogisticRegression()
+lr_model.fit(transformed_training_matrix, ytrain)
+
+
+y_pred_gbm = gbm.predict(xtest, pred_leaf=True)
+num_leaf = 31
+transformed_testing_matrix = np.zeros([len(y_pred_gbm), len(y_pred_gbm[0]) * num_leaf], dtype=np.int32)
+for i in range(0, len(y_pred_gbm)):
+    temp = np.arange(len(y_pred_gbm[0])) * num_leaf + np.array(y_pred_gbm[i])
+    transformed_testing_matrix[i][temp] += 1
+y_pred=lr_model.predict(transformed_testing_matrix)
+
+
+print((y_pred==ytest).mean())
+
